@@ -91,6 +91,17 @@ residuals_mp <- function(mp_fit) {
 }
 
 
+# Degrees of freedom of error variance in two-way analysis
+# It's only valid for linear model (as approximation for median polish)
+approx_df2 <- function(df_prot) {
+    df_prot <- df_prot %>% group_by(run) %>% filter(any(is_obs)) %>% ungroup()
+    dfree_err <- (n_distinct(df_prot$run) - 1) * (n_distinct(df_prot$feature) - 1)
+    nb_miss <- sum(!df_prot$is_obs)
+    
+    return(as.integer(dfree_err - nb_miss))
+}
+
+
 # Data wrangling ----------------------------------------------------------
 # Convert to the working format
 df_allftr <- mss2ftr(df_mss)
@@ -101,15 +112,70 @@ df_allftr <- df_allftr %>% group_by(protein) %>%
 
 
 # Residuals around TMP estimates ------------------------------------------
-nested_prot <- df_allftr %>% group_by(protein) %>% nest()
+# nested_prot <- df_allftr %>% group_by(protein) %>% nest()
+
+nested_prot <- df_allftr %>% 
+    select(protein, run, feature, log2inty, is_obs) %>% 
+    group_by(protein) %>% 
+    nest()
 
 nested_prot <- nested_prot %>% 
     mutate(
         mp_fit = map(data, medpolish_df), 
         mp_resid = map(mp_fit, residuals_mp), 
-        mad_res = map_dbl(mp_resid, ~ .$log2res %>% mad(na.rm = T)), 
-        nb_obs = map_int(mp_resid, ~ sum(!is.na(.$log2res)))
+        mad_res = map_dbl(mp_resid, ~ mad(.$log2res, na.rm = T)), 
+        nb_obs = map_int(mp_resid, ~ sum(!is.na(.$log2res))), 
+        nb_ftr = map_int(data, ~ n_distinct(.$feature)), 
+        dfree = map_int(data, approx_df2)
     )
+
+
+# Shrinking variance estimates with limma ---------------------------------
+prot_res <- nested_prot %>% 
+    select(protein, mad_res, dfree) %>% 
+    mutate(var_res = mad_res ^ 2)
+
+prot_res2 <- prot_res %>% filter(mad_res != 0, dfree > 1)
+em_fit <- limma::squeezeVar(var = prot_res2$var_res, df = prot_res2$dfree)
+prot_res2 <- prot_res2 %>% mutate(var_eb = em_fit$var.post)
+
+
+# variance estimates before/after shrinkage -------------------------------
+prot_res2 %>% ggplot(aes(var_res, var_eb, colour = dfree)) + 
+    geom_point() + geom_abline(slope = 1)
+
+brk_obs <- quantile(prot_res2$dfree)
+prot_res2 %>% ggplot(aes(sqrt(var_res), sqrt(var_eb), colour = dfree)) + 
+    geom_point() + geom_abline(slope = 1) + 
+    scale_color_gradient( trans = "log", breaks = brk_obs, labels = brk_obs)
+
+prot_res2 %>% mutate(d_mad = sqrt(var_eb) - sqrt(var_res)) %>% 
+    ggplot(aes(sqrt(var_res), d_mad, colour = dfree)) + 
+    geom_point() + geom_hline(yintercept = 0) + 
+    scale_color_gradient( trans = "log", breaks = brk_obs, labels = brk_obs)
+
+
+# Initial attempt for shrinking variance estimates ------------------------
+# fit_gamma <- function(x) {
+#     mu_x <- mean(x)
+#     var_x <- var(x)
+#     shape_g <- mu_x ^ 2 / var_x
+#     rate_g <- mu_x / var_x
+#     fit_g <- MASS::fitdistr(x, densfun = "gamma", 
+#                             start = list(shape = shape_g, rate = rate_g))
+#     
+#     return(fit_g$estimate)
+# }
+# 
+# prot_res <- nested_prot %>% 
+#     select(protein, mad_res, nb_obs) %>% 
+#     mutate(mad_res2 = mad_res ^ 2)
+# 
+# mad2_sample <- prot_res %>% filter(mad_res != 0, nb_obs > 60) %>% .$mad_res2 
+# param_gamma <- fit_gamma(mad2_sample)
+# hist(mad2_sample, pch=20, breaks=100, prob=TRUE, main="")
+# curve(dgamma(x, param_gamma[1], param_gamma[2]), col="red", lwd=2, add=T)
+
 
 
 # Different residuals -----------------------------------------------------
