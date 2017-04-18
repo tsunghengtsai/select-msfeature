@@ -60,6 +60,65 @@ ftr2mss <- function(df_ftr) {
     return(df_msstats)
 }
 
+
+# Flag features with low and non-essential coverage
+flag_lowcover <- function(df_prot) {
+    mat_obsftr <- df_prot %>% select(run, feature, is_obs) %>% 
+        spread(feature, is_obs) %>% 
+        select(-run) %>% as.matrix()
+    idx_hicover <- (colSums(mat_obsftr) / nrow(mat_obsftr)) > 0.5
+    if (all(idx_hicover)) {
+        # All features have high coverage
+        ftr_hicover <- colnames(mat_obsftr)[idx_hicover]
+    } else {
+        # Otherwise consider set cover 
+        ftr_hicover <- colnames(mat_obsftr)[union(idx_coverset(mat_obsftr), which(idx_hicover))]
+    }
+    
+    return(df_prot %>% mutate(is_lowcvr = !(feature %in% ftr_hicover)))
+}
+
+
+# Index of columns (features) covering complete set of rows (runs)
+# Matrix of logical variables as input
+idx_coverset <- function(mat_obs) {
+    if (ncol(mat_obs) == 1) return(1)  # only one feature
+    cost <- colSums(!mat_obs)  # number of missing values as cost
+    # return all fully covering features
+    if (any(cost == 0)) return(which(cost == 0))
+    is_complete <- FALSE
+    set_ftr <- NULL
+    # find features with the smallest cost (# of missing / new additions)
+    # until no more additions can be found (all runs are covered)
+    # NB: runs covered by selected features will be removed from mat_obs
+    while (!is_complete) {
+        if (nrow(mat_obs) == 1) {
+            add <- c(mat_obs)
+        } else {
+            add <- colSums(mat_obs)
+        }
+        if (all(add == 0)) {
+            is_complete <- TRUE
+        } else {
+            cost_per_add <- cost / add
+            min_cost <- min(cost_per_add)
+            new_ftr <- which(cost_per_add == min_cost)
+            set_ftr <- c(set_ftr, new_ftr)
+            if (length(new_ftr) == 1) {
+                idx_add <- which(mat_obs[, new_ftr])
+            } else {
+                idx_add <- which(rowSums(mat_obs[, new_ftr, drop = FALSE]) != 0)
+            }
+            mat_obs[, new_ftr] <- FALSE  # exclude selected features from further consideration
+            mat_obs <- mat_obs[-idx_add, , drop = FALSE]  # remove covered runs
+            if (nrow(mat_obs) == 0) is_complete <- TRUE
+        }
+    }
+    
+    return(set_ftr)
+}
+
+
 # Two-way analysis with median polish
 medpolish_df <- function(df_prot) {
     # Required fields of df_prot: feature, run, log2inty
@@ -106,31 +165,49 @@ approx_df2 <- function(df_prot) {
 # Convert to the working format
 df_allftr <- mss2ftr(df_mss)
 
-# Remove proteins with no valid measurements
-df_allftr <- df_allftr %>% group_by(protein) %>% 
-    filter(any(is_obs)) %>% ungroup()
+# Remove proteins with no valid measurements (replaced with stricter filtering)
+# df_allftr <- df_allftr %>% group_by(protein) %>% 
+#     filter(any(is_obs)) %>% ungroup()
+
+# For each protein, remove uncovered runs and undetectable features
+df_allftr <- df_allftr %>% 
+    group_by(protein, run) %>% filter(any(is_obs)) %>% ungroup() %>% 
+    group_by(protein, feature) %>% filter(any(is_obs)) %>% ungroup()
+
+# Compute the proportion of runs with a feature detected 
+# obs_ftr <- df_allftr %>% 
+#     group_by(protein) %>% 
+#     mutate(nb_run = n_distinct(run)) %>% 
+#     group_by(protein, feature) %>% 
+#     summarise(p_obs = sum(is_obs / nb_run)) %>% ungroup()
 
 
 # Residuals around TMP estimates ------------------------------------------
-# nested_prot <- df_allftr %>% group_by(protein) %>% nest()
-
 nested_prot <- df_allftr %>% 
     select(protein, run, feature, log2inty, is_obs) %>% 
     group_by(protein) %>% 
     nest()
 
+# Coverage
 nested_prot <- nested_prot %>% 
     mutate(
-        mp_fit = map(data, medpolish_df), 
+        data = map(data, flag_lowcover), 
+        subdata = map(data, ~ filter(., !is_lowcvr))
+    )
+
+# Technical variability
+nested_prot <- nested_prot %>% 
+    mutate(
+        mp_fit = map(subdata, medpolish_df), 
         mp_resid = map(mp_fit, residuals_mp), 
         mad_res = map_dbl(mp_resid, ~ mad(.$log2res, na.rm = T)), 
         nb_obs = map_int(mp_resid, ~ sum(!is.na(.$log2res))), 
-        nb_ftr = map_int(data, ~ n_distinct(.$feature)), 
-        dfree = map_int(data, approx_df2)
+        # nb_ftr = map_int(subdata, ~ n_distinct(.$feature)), 
+        dfree = map_int(subdata, approx_df2)
     )
 
 
-# Shrinking variance estimates with limma ---------------------------------
+# Shrinkage variance estimation with limma --------------------------------
 prot_res <- nested_prot %>% 
     select(protein, mad_res, dfree) %>% 
     mutate(var_res = mad_res ^ 2)
@@ -142,17 +219,59 @@ prot_res2 <- prot_res2 %>% mutate(var_eb = em_fit$var.post)
 
 # variance estimates before/after shrinkage -------------------------------
 prot_res2 %>% ggplot(aes(var_res, var_eb, colour = dfree)) + 
-    geom_point() + geom_abline(slope = 1)
+    geom_point() + geom_abline(color = "red")
 
-brk_obs <- quantile(prot_res2$dfree)
 prot_res2 %>% ggplot(aes(sqrt(var_res), sqrt(var_eb), colour = dfree)) + 
-    geom_point() + geom_abline(slope = 1) + 
-    scale_color_gradient( trans = "log", breaks = brk_obs, labels = brk_obs)
+    geom_point() + 
+    geom_abline(color = "red") + 
+    geom_hline(yintercept = sqrt(em_fit$var.prior), color = "red", lty = 2) +
+    scale_colour_gradient(trans = "log", breaks = 4 ^ (1:10))
 
 prot_res2 %>% mutate(d_mad = sqrt(var_eb) - sqrt(var_res)) %>% 
     ggplot(aes(sqrt(var_res), d_mad, colour = dfree)) + 
-    geom_point() + geom_hline(yintercept = 0) + 
-    scale_color_gradient( trans = "log", breaks = brk_obs, labels = brk_obs)
+    geom_point() + 
+    geom_hline(yintercept = 0) + 
+    scale_colour_gradient(trans = "log", breaks = 4 ^ (1:10))
+
+
+# Flag outliers with spread estimates -------------------------------------
+nested_prot <- nested_prot %>% left_join(prot_res2)
+
+nested_prot <- nested_prot %>% 
+    mutate(
+        mp_resid = map2(mp_resid, var_res, ~ mutate(.x, is_madolr = abs(log2res) > 3 * sqrt(.y))), 
+        mp_resid = map2(mp_resid, var_eb, ~ mutate(.x, is_ebolr = abs(log2res) > 3 * sqrt(.y)))
+    )
+
+
+# Plot profiles with the flag ---------------------------------------------
+
+# nested_prot %>% mutate(w_olr = map_lgl(mp_resid, ~ any(.$is_ebolr))) %>% filter(w_olr)
+
+
+pdf("profile_out.pdf", width = 8, height = 6)
+for (i in 1:10) {
+    oneprot <- nested_prot$data[[i]] %>% left_join(nested_prot$mp_resid[[i]]) %>% 
+        mutate(olr = if_else(is_ebolr, "Yes", "No/Unsure", "No/Unsure")) %>% 
+        group_by(feature) %>% 
+        mutate(
+            ftr_olr = if_else(is_lowcvr, "Low coverage", 
+                              if_else(any(is_ebolr, na.rm = T), "W/ outlier", "W/O outlier"))
+        ) %>% ungroup()
+    print(
+        ggplot(oneprot, aes(run, log2inty, color = feature, shape = olr, group = feature)) + 
+            geom_point(size = 3) + 
+            geom_line() + 
+            ggtitle(nested_prot$protein[i]) + 
+            facet_wrap(~ ftr_olr) + 
+            coord_cartesian(ylim = c(17, 35)) + 
+            theme(legend.position = "none", 
+                  # axis.text.x = element_text(angle = 90, hjust = 1), 
+                  axis.text.x = element_blank())
+    )
+}
+dev.off()
+
 
 
 # Initial attempt for shrinking variance estimates ------------------------
