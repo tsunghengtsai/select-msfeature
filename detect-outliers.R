@@ -161,30 +161,33 @@ approx_df2 <- function(df_prot) {
 }
 
 
+# Degrees of freedom for MAD estimate in two-way analysis
+# MAD is 37% as efficient as sample SD
+approx_df2_mad <- function(df_prot) {
+    df_prot <- df_prot %>% group_by(run) %>% filter(any(is_obs)) %>% ungroup()
+    dfree_err <- (n_distinct(df_prot$run) - 1) * (n_distinct(df_prot$feature) - 1)
+    nb_miss <- sum(!df_prot$is_obs)
+    df2 <- dfree_err - nb_miss
+    # df2_mad <- floor(max(1, df2 * 0.37))
+    df2_mad <- max(1, df2 * 0.37)
+    
+    return(df2_mad)
+}
+
+
 # Data wrangling ----------------------------------------------------------
 # Convert to the working format
 df_allftr <- mss2ftr(df_mss)
-
-# Remove proteins with no valid measurements (replaced with stricter filtering)
-# df_allftr <- df_allftr %>% group_by(protein) %>% 
-#     filter(any(is_obs)) %>% ungroup()
 
 # For each protein, remove uncovered runs and undetectable features
 df_allftr <- df_allftr %>% 
     group_by(protein, run) %>% filter(any(is_obs)) %>% ungroup() %>% 
     group_by(protein, feature) %>% filter(any(is_obs)) %>% ungroup()
 
-# Compute the proportion of runs with a feature detected 
-# obs_ftr <- df_allftr %>% 
-#     group_by(protein) %>% 
-#     mutate(nb_run = n_distinct(run)) %>% 
-#     group_by(protein, feature) %>% 
-#     summarise(p_obs = sum(is_obs / nb_run)) %>% ungroup()
-
 
 # Residuals around TMP estimates ------------------------------------------
 nested_prot <- df_allftr %>% 
-    select(protein, run, feature, log2inty, is_obs) %>% 
+    select(protein, run, peptide, feature, log2inty, is_obs) %>% 
     group_by(protein) %>% 
     nest()
 
@@ -202,8 +205,7 @@ nested_prot <- nested_prot %>%
         mp_resid = map(mp_fit, residuals_mp), 
         mad_res = map_dbl(mp_resid, ~ mad(.$log2res, na.rm = T)), 
         nb_obs = map_int(mp_resid, ~ sum(!is.na(.$log2res))), 
-        # nb_ftr = map_int(subdata, ~ n_distinct(.$feature)), 
-        dfree = map_int(subdata, approx_df2)
+        dfree = map_dbl(subdata, approx_df2_mad)
     )
 
 
@@ -212,26 +214,43 @@ prot_res <- nested_prot %>%
     select(protein, mad_res, dfree) %>% 
     mutate(var_res = mad_res ^ 2)
 
-prot_res2 <- prot_res %>% filter(mad_res != 0, dfree > 1)
-em_fit <- limma::squeezeVar(var = prot_res2$var_res, df = prot_res2$dfree)
-prot_res2 <- prot_res2 %>% mutate(var_eb = em_fit$var.post)
+# prot_res2 <- prot_res %>% filter(mad_res != 0, dfree > 1)
+prot_res2 <- prot_res %>% filter(mad_res != 0, dfree > 0)
+eb_fit <- limma::squeezeVar(var = prot_res2$var_res, df = prot_res2$dfree)
+reb_fit <- limma::squeezeVar(var = prot_res2$var_res, df = prot_res2$dfree, robust = TRUE)
+
+prot_res2 <- prot_res2 %>% 
+    mutate(
+        var_eb = eb_fit$var.post, 
+        var_reb = reb_fit$var.post
+    )
 
 
 # variance estimates before/after shrinkage -------------------------------
 prot_res2 %>% ggplot(aes(var_res, var_eb, colour = dfree)) + 
     geom_point() + geom_abline(color = "red")
 
+# EB fit
 prot_res2 %>% ggplot(aes(sqrt(var_res), sqrt(var_eb), colour = dfree)) + 
     geom_point() + 
     geom_abline(color = "red") + 
-    geom_hline(yintercept = sqrt(em_fit$var.prior), color = "red", lty = 2) +
-    scale_colour_gradient(trans = "log", breaks = 4 ^ (1:10))
+    geom_hline(yintercept = sqrt(eb_fit$var.prior), color = "red", lty = 2) +
+    scale_colour_gradient(trans = "log", breaks = 4 ^ (1:5)) + 
+    coord_cartesian(xlim = c(0, 0.6), ylim = c(0, 0.6))
 
-prot_res2 %>% mutate(d_mad = sqrt(var_eb) - sqrt(var_res)) %>% 
+# Robust EB fit
+prot_res2 %>% ggplot(aes(sqrt(var_res), sqrt(var_reb), colour = dfree)) + 
+    geom_point() + 
+    geom_abline(color = "red") + 
+    geom_hline(yintercept = sqrt(reb_fit$var.prior), color = "red", lty = 2) +
+    scale_colour_gradient(trans = "log", breaks = 4 ^ (1:5)) + 
+    coord_cartesian(xlim = c(0, 0.6), ylim = c(0, 0.6))
+
+prot_res2 %>% mutate(d_mad = sqrt(var_reb) - sqrt(var_res)) %>% 
     ggplot(aes(sqrt(var_res), d_mad, colour = dfree)) + 
     geom_point() + 
     geom_hline(yintercept = 0) + 
-    scale_colour_gradient(trans = "log", breaks = 4 ^ (1:10))
+    scale_colour_gradient(trans = "log", breaks = 4 ^ (1:5))
 
 
 # Flag outliers with spread estimates -------------------------------------
@@ -240,39 +259,54 @@ nested_prot <- nested_prot %>% left_join(prot_res2)
 nested_prot <- nested_prot %>% 
     mutate(
         mp_resid = map2(mp_resid, var_res, ~ mutate(.x, is_madolr = abs(log2res) > 3 * sqrt(.y))), 
+        mp_resid = map2(mp_resid, var_reb, ~ mutate(.x, is_rebolr = abs(log2res) > 3 * sqrt(.y))), 
         mp_resid = map2(mp_resid, var_eb, ~ mutate(.x, is_ebolr = abs(log2res) > 3 * sqrt(.y)))
     )
 
 
 # Plot profiles with the flag ---------------------------------------------
-
-# nested_prot %>% mutate(w_olr = map_lgl(mp_resid, ~ any(.$is_ebolr))) %>% filter(w_olr)
-
-
-pdf("profile_out.pdf", width = 8, height = 6)
-for (i in 1:10) {
-    oneprot <- nested_prot$data[[i]] %>% left_join(nested_prot$mp_resid[[i]]) %>% 
-        mutate(olr = if_else(is_ebolr, "Yes", "No/Unsure", "No/Unsure")) %>% 
+plot_annoprofile <- function(nested, idx) {
+    oneprot <- nested$data[[idx]] %>% left_join(nested$mp_resid[[idx]]) %>% 
+        mutate(olr = if_else(is_rebolr, "Yes", "No/Unsure", "No/Unsure")) %>% 
         group_by(feature) %>% 
         mutate(
-            ftr_olr = if_else(is_lowcvr, "Low coverage", 
-                              if_else(any(is_ebolr, na.rm = T), "W/ outlier", "W/O outlier"))
-        ) %>% ungroup()
-    print(
-        ggplot(oneprot, aes(run, log2inty, color = feature, shape = olr, group = feature)) + 
-            geom_point(size = 3) + 
-            geom_line() + 
-            ggtitle(nested_prot$protein[i]) + 
-            facet_wrap(~ ftr_olr) + 
-            coord_cartesian(ylim = c(17, 35)) + 
-            theme(legend.position = "none", 
-                  # axis.text.x = element_text(angle = 90, hjust = 1), 
-                  axis.text.x = element_blank())
-    )
+            ftr_olr = if_else(is_lowcvr, "Low coverage", if_else(any(is_rebolr, na.rm = T), "W/ outlier", "W/O outlier")), 
+            ftr_olr = factor(ftr_olr, levels = c("Low coverage", "W/ outlier", "W/O outlier"))
+        ) %>% 
+        ungroup()
+    oneprot %>% 
+        ggplot(aes(run, log2inty, color = peptide, group = feature, shape = olr, alpha = olr)) + 
+        geom_point(size = 3) + 
+        geom_line() + 
+        scale_alpha_discrete(range = c(0.5, 1)) + 
+        ggtitle(nested$protein[idx]) + 
+        facet_wrap(~ ftr_olr, drop = F) + 
+        coord_cartesian(ylim = c(17, 35)) + 
+        theme(legend.position = "none", 
+              # axis.text.x = element_text(angle = 90, hjust = 1), 
+              axis.text.x = element_blank())
+}
+
+
+
+# Print profiles to file --------------------------------------------------
+
+pdf("profile_out_10.pdf", width = 9, height = 6)
+for (i in 901:1000) {
+    print(plot_annoprofile(nested_prot, i))
 }
 dev.off()
 
 
+
+# Spike-in ----------------------------------------------------------------
+prot_spike <- c("P44015", "P55752", "P44374", "P44983", "P44683", "P55249")
+
+pdf("profile_out_spike.pdf", width = 9, height = 6)
+for (i in which(nested_prot$protein %in% prot_spike)) {
+    print(plot_annoprofile(nested_prot, i))
+}
+dev.off()
 
 # Initial attempt for shrinking variance estimates ------------------------
 # fit_gamma <- function(x) {
