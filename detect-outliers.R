@@ -66,13 +66,13 @@ flag_lowcover <- function(df_prot) {
     mat_obsftr <- df_prot %>% select(run, feature, is_obs) %>% 
         spread(feature, is_obs) %>% 
         select(-run) %>% as.matrix()
-    idx_hicover <- (colSums(mat_obsftr) / nrow(mat_obsftr)) > 0.5
-    if (all(idx_hicover)) {
+    is_hicover <- (colSums(mat_obsftr) / nrow(mat_obsftr)) > 0.5
+    if (all(is_hicover)) {
         # All features have high coverage
-        ftr_hicover <- colnames(mat_obsftr)[idx_hicover]
+        ftr_hicover <- colnames(mat_obsftr)[is_hicover]
     } else {
         # Otherwise consider set cover 
-        ftr_hicover <- colnames(mat_obsftr)[union(idx_coverset(mat_obsftr), which(idx_hicover))]
+        ftr_hicover <- colnames(mat_obsftr)[union(idx_coverset(mat_obsftr), which(is_hicover))]
     }
     
     return(df_prot %>% mutate(is_lowcvr = !(feature %in% ftr_hicover)))
@@ -130,6 +130,7 @@ medpolish_df <- function(df_prot) {
     return(mp_fit)
 }
 
+
 # Generate run-level summarization from TMP fit
 runsum_mp <- function(mp_fit) {
     df_sum <- tibble(
@@ -139,6 +140,7 @@ runsum_mp <- function(mp_fit) {
     
     return(df_sum)
 }
+
 
 # Extract residuals of TMP fit
 residuals_mp <- function(mp_fit) {
@@ -175,11 +177,87 @@ approx_df2_mad <- function(df_prot) {
 }
 
 
+# Select features based on the flags of outliers
+# Features are flagged as high-variance if their non-outlier measurements 
+# do not provide reasonable coverage (50%)
+# flag_hivar <- function(df_res) {
+#     # The matrix may contain NA (can't determine outlyingness for unobserved data)
+#     mat_olrftr <- df_res %>% select(run, feature, is_olr) %>% 
+#         spread(feature, is_olr) %>% 
+#         select(-run) %>% as.matrix()
+#     # Test for high-coverage features (non-outlying observed measurements account for >50%)
+#     is_hicover <- (colSums(!mat_olrftr, na.rm = TRUE) / nrow(mat_olrftr)) > 0.5
+#     
+#     if (any(is_hicover)) {
+#         mat_hicover <- mat_olrftr[, is_hicover, drop = FALSE]
+#         
+#         # Test if all runs covered by >1 high-coverage features
+#         run_cover <- rowSums(!is.na(mat_hicover)) > 0
+#         run_incover <- rowSums(!mat_hicover, na.rm = TRUE) > 0
+#         if (all(run_cover) && all(run_incover)) {
+#             # All covered by high-coverage features
+#             set_ftr <- colnames(mat_hicover)
+#         } else if (all(run_cover) && any(run_incover)) {
+#             # Some runs become uncovered when removing outliers -> swap good candidates
+#             set_ftr <- colnames(mat_hicover)
+#             run_per_ftr <- colSums(!mat_hicover, na.rm = TRUE)
+#             for (i in which(!run_incover)) {
+#                 idx_cand <- which(!is.na(mat_hicover[i, ]))
+#                 run_per_cand <- run_per_ftr[idx_cand]
+#                 idx_maxcand <- which(run_per_cand == max(run_per_cand))
+#                 mat_hicover[i, idx_cand[idx_maxcand]] <- FALSE
+#             }
+#         }
+# 
+#     }
+# 
+#     return(df_res %>% mutate(is_hivar = !(feature %in% set_ftr)))
+# }
+
+
+
+flag_hivar <- function(df_res) {
+    # The matrix may contain NA (can't determine outlyingness for unobserved data)
+    mat_olrftr <- df_res %>% select(run, feature, is_olr) %>% 
+        spread(feature, is_olr) %>% 
+        select(-run) %>% as.matrix()
+    # Test for no-outlier ("inlier") features
+    is_allin <- colSums(mat_olrftr, na.rm = TRUE) == 0
+    if (any(is_allin)) {
+        mat_inftr <- mat_olrftr[, is_allin, drop = FALSE]
+        mat_outftr <- mat_olrftr[, !is_allin, drop = FALSE]
+        # Test if all runs covered by at least one no-outlier features
+        run_cover <- rowSums(!is.na(mat_inftr)) > 0
+        # is_incover <- all(rowSums(!is.na(mat_inftr)) > 0)
+        is_hicover <- (colSums(!mat_outftr, na.rm = TRUE) / nrow(mat_outftr)) > 0.5
+        if (all(run_cover)) {
+            # Test if non-outlier (& observed) measurements account for >50%
+            # is_hicover <- (colSums(!mat_outftr, na.rm = TRUE) / nrow(mat_outftr)) > 0.5
+            set_ftr <- c(colnames(mat_inftr), colnames(mat_outftr)[is_hicover])
+        } else {
+            # Acquire key players
+            # idx_misrun <- which(!run_cover)
+            set_ftr <- c(colnames(mat_inftr), colnames(mat_outftr)[is_hicover])
+        }
+    } else {
+        # All features contain at least one outlier
+        # (19, 20, 111, 130, 1846, 2521)
+        mat_outftr <- mat_olrftr[, !is_allin, drop = FALSE]
+        is_hicover <- (colSums(!mat_outftr, na.rm = TRUE) / nrow(mat_outftr)) > 0.5
+        ftr_cover <- colnames(mat_outftr)[is_hicover]
+    }
+    
+    return(df_res %>% mutate(is_hivar = !(feature %in% set_ftr)))
+}
+
+
+
 # Data wrangling ----------------------------------------------------------
 # Convert to the working format
 df_allftr <- mss2ftr(df_mss)
 
 # For each protein, remove uncovered runs and undetectable features
+# Subsequent processing assumes this is done
 df_allftr <- df_allftr %>% 
     group_by(protein, run) %>% filter(any(is_obs)) %>% ungroup() %>% 
     group_by(protein, feature) %>% filter(any(is_obs)) %>% ungroup()
@@ -220,10 +298,7 @@ eb_fit <- limma::squeezeVar(var = prot_res2$var_res, df = prot_res2$dfree)
 reb_fit <- limma::squeezeVar(var = prot_res2$var_res, df = prot_res2$dfree, robust = TRUE)
 
 prot_res2 <- prot_res2 %>% 
-    mutate(
-        var_eb = eb_fit$var.post, 
-        var_reb = reb_fit$var.post
-    )
+    mutate(var_eb = eb_fit$var.post, var_reb = reb_fit$var.post)
 
 
 # variance estimates before/after shrinkage -------------------------------
@@ -252,25 +327,30 @@ prot_res2 %>% mutate(d_mad = sqrt(var_reb) - sqrt(var_res)) %>%
     geom_hline(yintercept = 0) + 
     scale_colour_gradient(trans = "log", breaks = 4 ^ (1:5))
 
+prot_res2 %>% ggplot(aes(var_res)) + 
+    geom_histogram(binwidth = 0.005) + 
+    geom_vline(xintercept = (reb_fit$var.prior), color = "red", lty = 2)
 
-# Flag outliers with spread estimates -------------------------------------
+
+# Flag outliers with scale estimates --------------------------------------
 nested_prot <- nested_prot %>% left_join(prot_res2)
 
+# Flag outliers based on robust EB estimates (other options: EB, MAD)
 nested_prot <- nested_prot %>% 
-    mutate(
-        mp_resid = map2(mp_resid, var_res, ~ mutate(.x, is_madolr = abs(log2res) > 3 * sqrt(.y))), 
-        mp_resid = map2(mp_resid, var_reb, ~ mutate(.x, is_rebolr = abs(log2res) > 3 * sqrt(.y))), 
-        mp_resid = map2(mp_resid, var_eb, ~ mutate(.x, is_ebolr = abs(log2res) > 3 * sqrt(.y)))
-    )
+    mutate(mp_resid = map2(mp_resid, var_reb, ~ mutate(.x, is_olr = abs(log2res) > 3 * sqrt(.y))))
 
+nested_prot <- nested_prot %>% 
+    mutate(mp_resid = map(mp_resid, flag_hivar))
+
+nested_prot %>% mutate(rmv = map_lgl(mp_resid, ~ all(.$is_hivar))) %>% filter(rmv)
 
 # Plot profiles with the flag ---------------------------------------------
 plot_annoprofile <- function(nested, idx) {
     oneprot <- nested$data[[idx]] %>% left_join(nested$mp_resid[[idx]]) %>% 
-        mutate(olr = if_else(is_rebolr, "Yes", "No/Unsure", "No/Unsure")) %>% 
+        mutate(olr = if_else(is_olr, "Yes", "No/Unsure", "No/Unsure")) %>% 
         group_by(feature) %>% 
         mutate(
-            ftr_olr = if_else(is_lowcvr, "Low coverage", if_else(any(is_rebolr, na.rm = T), "W/ outlier", "W/O outlier")), 
+            ftr_olr = if_else(is_lowcvr, "Low coverage", if_else(any(is_olr, na.rm = T), "W/ outlier", "W/O outlier")), 
             ftr_olr = factor(ftr_olr, levels = c("Low coverage", "W/ outlier", "W/O outlier"))
         ) %>% 
         ungroup()
@@ -288,15 +368,36 @@ plot_annoprofile <- function(nested, idx) {
 }
 
 
+plot_annoprofile2 <- function(nested, idx) {
+    oneprot <- nested$data[[idx]] %>% left_join(nested$mp_resid[[idx]]) %>% 
+        mutate(olr = if_else(is_olr, "Yes", "No/Unsure", "No/Unsure")) %>% 
+        mutate(ftr_olr = if_else(is_lowcvr | is_hivar, "Remove", "Select"), 
+               ftr_olr = factor(ftr_olr, levels = c("Remove", "Select")))
+    oneprot %>% 
+        ggplot(aes(run, log2inty, color = peptide, group = feature, shape = olr, alpha = olr)) + 
+        geom_point(size = 3) + 
+        geom_line() + 
+        scale_alpha_discrete(range = c(0.5, 1)) + 
+        ggtitle(nested$protein[idx]) + 
+        facet_wrap(~ ftr_olr, drop = F) + 
+        coord_cartesian(ylim = c(17, 35)) + 
+        theme(legend.position = "none", 
+              axis.text.x = element_blank())
+}
 
 # Print profiles to file --------------------------------------------------
 
-pdf("profile_out_10.pdf", width = 9, height = 6)
-for (i in 901:1000) {
-    print(plot_annoprofile(nested_prot, i))
+# pdf("profile_out_10.pdf", width = 9, height = 6)
+# for (i in 901:1000) {
+#     print(plot_annoprofile(nested_prot, i))
+# }
+# dev.off()
+
+pdf("profile_slc_02.pdf", width = 9, height = 6)
+for (i in 101:200) {
+    print(plot_annoprofile2(nested_prot, i))
 }
 dev.off()
-
 
 
 # Spike-in ----------------------------------------------------------------
@@ -307,6 +408,13 @@ for (i in which(nested_prot$protein %in% prot_spike)) {
     print(plot_annoprofile(nested_prot, i))
 }
 dev.off()
+
+pdf("profile_slc_spike.pdf", width = 9, height = 6)
+for (i in which(nested_prot$protein %in% prot_spike)) {
+    print(plot_annoprofile2(nested_prot, i))
+}
+dev.off()
+
 
 # Initial attempt for shrinking variance estimates ------------------------
 # fit_gamma <- function(x) {
