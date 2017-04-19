@@ -209,3 +209,19 @@ list_rmfeature <- function(df_prot, df_res) {
     return(c(ftr_lowcvr, ftr_hivar))
 }
 
+
+# Plot annotated profiles from nested data frame
+plot_profile_nest <- function(nested, idx) {
+    oneprot <- nested$data[[idx]] %>% left_join(nested$mp_resid[[idx]]) %>% 
+        mutate(olr = if_else(is_olr, "Yes", "No/Unsure", "No/Unsure")) %>% 
+        mutate(ftr_olr = if_else(is_lowcvr | is_hivar, "Remove", "Select"), 
+               ftr_olr = factor(ftr_olr, levels = c("Remove", "Select")))
+    oneprot %>% 
+        ggplot(aes(run, log2inty, color = peptide, group = feature, shape = olr, alpha = olr)) + 
+        geom_point(size = 3) + geom_line() + 
+        scale_alpha_discrete(range = c(0.5, 1)) + 
+        ggtitle(nested$protein[idx]) + 
+        facet_wrap(~ ftr_olr, drop = F) + 
+        coord_cartesian(ylim = c(10, 35)) + 
+        theme(legend.position = "none", axis.text.x = element_blank())
+}
