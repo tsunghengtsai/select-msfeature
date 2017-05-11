@@ -1,4 +1,5 @@
 # Load required packages --------------------------------------------------
+library(MASS)
 library(tidyverse)
 library(stringr)
 library(broom)
@@ -60,11 +61,12 @@ df_sum %>%
     labs(y = "estimate", title = str_c(nb_sim, " simulations"))
 
 
-# Data in two-way table ---------------------------------------------------
+# Functions for two-way analysis ------------------------------------------
+
 gen2way <- function(n, p) {
     df_2way <- tibble(
-        run = rep(1:n, each = p), 
-        ftr = rep(1:p, n), 
+        run = rep(str_pad(1:n, str_length(n), pad = "0"), each = p), 
+        ftr = rep(str_pad(1:p, str_length(p), pad = "0"), n), 
         obs = rnorm(n * p)
     )
     
@@ -86,10 +88,19 @@ mad_mpres <- function(mp_fit) {
     return(mad(res))
 }
 
+adjmad_mpres <- function(mp_fit, dfree) {
+    res <- mp_fit$residuals %>% as.vector()
+    adjmad <- mad(res) * sqrt((length(res) - 1) / dfree)
+    
+    return(adjmad)
+}
+
+
+# Two-way analysis --------------------------------------------------------
 
 # Simulation setting
 nb_sim <- 100
-nb_run <- 2:100
+nb_run <- 2:50
 nb_ftr <- c(3, 10, 20)
 
 df_sim2 <- tibble(
@@ -97,6 +108,7 @@ df_sim2 <- tibble(
     n_ftr = rep(nb_ftr, length(nb_run) * nb_sim), 
     sim = rep(rep(1:nb_sim, each = length(nb_ftr)), length(nb_run))
 )
+    
 
 # Generate simulation data
 df_sim2 <- df_sim2 %>% 
@@ -114,8 +126,11 @@ df_sim2 <- df_sim2 %>%
     mutate(
         samp_lms = map_dbl(lm_fit, sigma), 
         dfree = map_int(lm_fit, df.residual), 
-        samp_mps = map_dbl(mp_fit, mad_mpres)
+        samp_mad = map_dbl(mp_fit, mad_mpres),
+        samp_mps = map2_dbl(mp_fit, dfree, adjmad_mpres)
     )
+
+# saveRDS(df_sim2, "output/sim_res2.RDS")
 
 # Summary of the simulation
 df_sum2 <- df_sim2 %>% 
@@ -139,6 +154,7 @@ sd_sum2 <- df_sum2 %>%
 
 df_sum2 <- left_join(ave_sum2, sd_sum2)
 
+
 # Mean +/- SD of the estimates
 df_sum2 %>% 
     ggplot(aes(n_run, ave_sim, ymin = ave_sim - sd_sim, ymax = ave_sim + sd_sim, 
@@ -154,3 +170,59 @@ df_sum2 %>%
     geom_point(position = position_dodge(width = 0.7)) + 
     labs(x = "# runs", y = "estimate", title = str_c(nb_sim, " simulations")) + 
     facet_wrap(~ n_ftr)
+
+
+# Fitting with lm and rlm -------------------------------------------------
+
+df_sim2 <- df_sim2 %>%
+    mutate(
+        lm_fit = map(data, ~ lm(obs ~ run + ftr, data = .)),
+        rlm_fit = map(data, ~ rlm(obs ~ run + ftr, data = .))
+    )
+
+# Estimates with lm and rlm
+df_sim3 <- df_sim2 %>% 
+    mutate(
+        samp_lms = map_dbl(lm_fit, sigma), 
+        samp_l1s = map_dbl(rlm_fit, sigma)
+    )
+
+# Summary of the simulation
+df_sum3 <- df_sim3 %>% 
+    group_by(n_ftr, n_run) %>% 
+    summarise(
+        ave_lms = mean(samp_lms), 
+        std_lms = sd(samp_lms), 
+        ave_l1s = mean(samp_l1s), 
+        std_l1s = sd(samp_l1s)
+    ) %>% 
+    ungroup()
+
+ave_sum3 <- df_sum3 %>% 
+    dplyr::select(-std_lms, -std_l1s) %>% 
+    gather(estimator, ave_sim, ave_lms, ave_l1s) %>% 
+    mutate(estimator = ifelse(str_detect(estimator, "lms"), "LM", "RLM"))
+
+sd_sum3 <- df_sum3 %>% 
+    dplyr::select(-ave_lms, -ave_l1s) %>% 
+    gather(estimator, sd_sim, std_lms, std_l1s) %>% 
+    mutate(estimator = ifelse(str_detect(estimator, "lms"), "LM", "RLM"))
+
+df_sum3 <- left_join(ave_sum3, sd_sum3)
+
+# Mean +/- SD of the estimates
+df_sum3 %>% 
+    ggplot(aes(n_run, ave_sim, ymin = ave_sim - sd_sim, ymax = ave_sim + sd_sim, 
+               colour = estimator, fill = estimator)) + 
+    geom_pointrange(position = position_dodge(width = 0.7)) + 
+    geom_hline(yintercept = 1) + 
+    labs(x = "# runs", y = "estimate", title = str_c(nb_sim, " simulations")) + 
+    facet_wrap(~ n_ftr)
+
+# SD of sample estimates
+df_sum3 %>% 
+    ggplot(aes(n_run, sd_sim, colour = estimator, fill = estimator)) + 
+    geom_point(position = position_dodge(width = 0.7)) + 
+    labs(x = "# runs", y = "estimate", title = str_c(nb_sim, " simulations")) + 
+    facet_wrap(~ n_ftr)
+
