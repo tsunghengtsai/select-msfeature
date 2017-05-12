@@ -212,7 +212,7 @@ list_rmfeature <- function(df_prot, df_res) {
 
 # Plot annotated profiles from nested data frame
 plot_profile_nest <- function(nested, idx) {
-    oneprot <- nested$data[[idx]] %>% left_join(nested$mp_resid[[idx]]) %>% 
+    oneprot <- nested$data[[idx]] %>% left_join(nested$subdata[[idx]]) %>% 
         mutate(olr = if_else(is_olr, "Yes", "No/Unsure", "No/Unsure")) %>% 
         mutate(ftr_olr = if_else(is_lowcvr | is_hivar, "Remove", "Select"), 
                ftr_olr = factor(ftr_olr, levels = c("Remove", "Select")))
