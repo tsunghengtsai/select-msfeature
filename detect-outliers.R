@@ -9,14 +9,14 @@ library(broom)
 source("utilities.R")
 
 # DDA datasets 
-load("data/DDA/iPRG_20170418/iprg.mq.RData")
-df_mss <- iprg.mq
+# load("data/DDA/iPRG_20170418/iprg.mq.RData")
+# df_mss <- iprg.mq
 
 # load("data/DDA/iPRG_20170418/iprg.progenesis.RData")
 # df_mss <- iprg.progenesis
 
-# load("data/DDA/iPRG_20170418/iprg.skyline.RData")
-# df_mss <- iprg.skyline
+load("data/DDA/iPRG_20170418/iprg.skyline.RData")
+df_mss <- iprg.skyline
 
 # DIA datasets
 
@@ -49,10 +49,13 @@ nested_prot <- nested_prot %>%
 # Robust linear model
 nested_prot <- nested_prot %>% 
     mutate(
-        rlm_fit = map(subdata, possibly(~ rlm(log2inty ~ run + feature, data = ., na.action = na.exclude), NULL)), 
+        rlm_fit = map(
+            subdata, 
+            possibly(~ rlm(log2inty ~ run + feature, data = ., scale.est = "Huber", 
+                           na.action = na.exclude), NULL)), 
         dfree = map_dbl(subdata, approx_df2)
     ) %>% 
-    mutate(s_res = map_dbl(rlm_fit, ~ ifelse(!is_null(.), sigma(.), NA)))
+    mutate(s_res = map_dbl(rlm_fit, ~ ifelse(!is_null(.), summary(.)$sigma, NA)))
 
 
 # Shrinkage variance estimation with limma --------------------------------
@@ -63,10 +66,10 @@ prot_res <- nested_prot %>%
 
 prot_res2 <- prot_res %>% filter(!is.na(s_res), dfree > 0)
 eb_fit <- limma::squeezeVar(var = prot_res2$var_res, df = prot_res2$dfree)
-reb_fit <- limma::squeezeVar(var = prot_res2$var_res, df = prot_res2$dfree, robust = TRUE)
+ebrob_fit <- limma::squeezeVar(var = prot_res2$var_res, df = prot_res2$dfree, robust = TRUE)
 
 prot_res2 <- prot_res2 %>% 
-    mutate(var_eb = eb_fit$var.post, var_reb = reb_fit$var.post)
+    mutate(var_eb = eb_fit$var.post, var_ebrob = ebrob_fit$var.post)
 
 
 # variance estimates before/after shrinkage -------------------------------
@@ -79,25 +82,26 @@ prot_res2 %>% ggplot(aes(sqrt(var_res), sqrt(var_eb), colour = dfree)) +
     geom_abline(color = "red") + 
     geom_hline(yintercept = sqrt(eb_fit$var.prior), color = "red", lty = 2) +
     scale_colour_gradient(trans = "log", breaks = 4 ^ (1:5)) + 
-    coord_cartesian(xlim = c(0, 0.6), ylim = c(0, 0.6))
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
 
 # Robust EB fit
-prot_res2 %>% ggplot(aes(sqrt(var_res), sqrt(var_reb), colour = dfree)) + 
+prot_res2 %>% ggplot(aes(sqrt(var_res), sqrt(var_ebrob), colour = dfree)) + 
     geom_point() + 
     geom_abline(color = "red") + 
-    geom_hline(yintercept = sqrt(reb_fit$var.prior), color = "red", lty = 2) +
+    geom_hline(yintercept = sqrt(ebrob_fit$var.prior), color = "red", lty = 2) +
     scale_colour_gradient(trans = "log", breaks = 4 ^ (1:5)) + 
-    coord_cartesian(xlim = c(0, 0.6), ylim = c(0, 0.6))
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
 
-prot_res2 %>% mutate(d_mad = sqrt(var_reb) - sqrt(var_res)) %>% 
+prot_res2 %>% mutate(d_mad = sqrt(var_ebrob) - sqrt(var_res)) %>% 
     ggplot(aes(sqrt(var_res), d_mad, colour = dfree)) + 
     geom_point() + 
     geom_hline(yintercept = 0) + 
     scale_colour_gradient(trans = "log", breaks = 4 ^ (1:5))
 
 prot_res2 %>% ggplot(aes(var_res)) + 
-    geom_histogram(binwidth = 0.005) + 
-    geom_vline(xintercept = (reb_fit$var.prior), color = "red", lty = 2)
+    geom_histogram(binwidth = 0.01) + 
+    geom_vline(xintercept = (ebrob_fit$var.prior), color = "red", lty = 2) + 
+    coord_cartesian(xlim = c(0, 0.5))
 
 
 # Flag outliers with scale estimates --------------------------------------
@@ -108,7 +112,7 @@ nested_prot2 <- nested_prot %>%
 
 # Flag outliers based on robust EB estimates (other options: EB, MAD)
 nested_prot2 <- nested_prot2 %>% 
-    mutate(subdata = map2(subdata, var_reb, ~ mutate(.x, is_olr = abs(log2res) > 3 * sqrt(.y))))
+    mutate(subdata = map2(subdata, var_ebrob, ~ mutate(.x, is_olr = abs(log2res) > 3 * sqrt(.y))))
 
 # Flag highly-variable features
 nested_prot2 <- nested_prot2 %>% 
@@ -133,7 +137,7 @@ df_rmftr <- nested_prot2 %>% select(protein, feature_rm) %>% unnest(feature_rm)
 
 # Print profiles to file --------------------------------------------------
 # Features to be removed
-# pdf("output/iprg_mq_rm_04.pdf", width = 9, height = 6)
+# pdf("output/iprg_mq_rm_01.pdf", width = 9, height = 6)
 # pdf("output/iprg_progenesis_rm.pdf", width = 9, height = 6)
 pdf("output/iprg_skyline_rm01.pdf", width = 9, height = 6)
 for (i in which(nested_prot2$protein %in% df_rmftr$protein)[1:500]) {
