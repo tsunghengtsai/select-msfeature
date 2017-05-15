@@ -92,16 +92,30 @@ prot_res2 %>% ggplot(aes(sqrt(var_res), sqrt(var_ebrob), colour = dfree)) +
     scale_colour_gradient(trans = "log", breaks = 4 ^ (1:5)) + 
     coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
 
-prot_res2 %>% mutate(d_mad = sqrt(var_ebrob) - sqrt(var_res)) %>% 
-    ggplot(aes(sqrt(var_res), d_mad, colour = dfree)) + 
+# Difference between EB fit and original scale estimate
+prot_res2 %>% mutate(d_scale = sqrt(var_ebrob) - sqrt(var_res)) %>% 
+    ggplot(aes(sqrt(var_res), d_scale, colour = dfree)) + 
     geom_point() + 
     geom_hline(yintercept = 0) + 
     scale_colour_gradient(trans = "log", breaks = 4 ^ (1:5))
 
+prot_res2 %>% mutate(d_mad = sqrt(var_ebrob) - sqrt(var_res)) %>% 
+    filter(d_mad > 0.1, dfree > 5)
+
+# Histogram of all variance estimates
 prot_res2 %>% ggplot(aes(var_res)) + 
     geom_histogram(binwidth = 0.01) + 
     geom_vline(xintercept = (ebrob_fit$var.prior), color = "red", lty = 2) + 
     coord_cartesian(xlim = c(0, 0.5))
+
+# Compare histogram of variances (with the same df) & fitted model
+fd_fit <- limma::fitFDistRobustly(x = prot_res2$var_res, df1 = prot_res2$dfree)
+sdf <- function(x, df1, df2, s) {df(x / s, df1, df2) / s}  # scaled F distribution
+
+prot_res2 %>% filter(dfree == 11) %>% 
+    ggplot(aes(var_res)) + 
+    geom_histogram(aes(y = ..density..), binwidth = 0.025) + 
+    stat_function(fun = sdf, args = list(df1 = 11, df2 = fd_fit$df2, s = fd_fit$scale), col = 'red')
 
 
 # Flag outliers with scale estimates --------------------------------------
@@ -141,7 +155,7 @@ df_rmftr <- nested_prot2 %>% select(protein, feature_rm) %>% unnest(feature_rm)
 # pdf("output/iprg_progenesis_rm.pdf", width = 9, height = 6)
 pdf("output/iprg_skyline_rm01.pdf", width = 9, height = 6)
 for (i in which(nested_prot2$protein %in% df_rmftr$protein)[1:500]) {
-    print(plot_profile_nest(nested_prot2, i))
+    if (!is.na(i)) {print(plot_profile_nest(nested_prot2, i))}
 }
 dev.off()
 
