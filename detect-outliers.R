@@ -6,19 +6,20 @@ library(broom)
 
 
 # Load functions and dataset ----------------------------------------------
-source("utilities.R")
 
 # DDA datasets 
-# load("data/DDA/iPRG_20170418/iprg.mq.RData")
-# df_mss <- iprg.mq
-
+load("data/DDA/iPRG_20170418/iprg.mq.RData")
 # load("data/DDA/iPRG_20170418/iprg.progenesis.RData")
-# df_mss <- iprg.progenesis
-
-load("data/DDA/iPRG_20170418/iprg.skyline.RData")
-df_mss <- iprg.skyline
+# load("data/DDA/iPRG_20170418/iprg.skyline.RData")
 
 # DIA datasets
+# load("data/DIA/Bruderer_20170418/bruderer.skyline.RData")
+# load("data/DIA/Bruderer_20170418/bruderer.SN.RData")
+
+dset_name <- ls()
+df_mss <- eval(parse(text = dset_name))
+
+source("utilities.R")
 
 
 # Data wrangling ----------------------------------------------------------
@@ -138,24 +139,32 @@ nested_prot2 <- nested_prot2 %>%
 
 df_rmftr <- nested_prot2 %>% select(protein, feature_rm) %>% unnest(feature_rm)
 
+# Peaks (feature in run) to be removed
+df_rmpk <- nested_prot2 %>% 
+    mutate(outlier = map(subdata, ~ select(filter(., is_olr), run, feature))) %>% 
+    select(protein, outlier) %>% 
+    unnest(outlier)
 
-# Save .RDS files ---------------------------------------------------------
-# saveRDS(as.data.frame(df_rmftr), "output/iprg.mq.rmftr.RDS")
-# saveRDS(as.data.frame(df_rmftr), "output/iprg.progenesis.rmftr.RDS")
-# saveRDS(as.data.frame(df_rmftr), "output/iprg.skyline.rmftr.RDS")
+# df_allftr %>% anti_join(rename(df_rmftr, feature = feature_rm))
+# df_allftr %>% anti_join(rename(df_rmftr, feature = feature_rm)) %>% anti_join(df_rmpk)
 
-# saveRDS(nested_prot, "output/iprg.mq.nest.RDS")
-# saveRDS(nested_prot, "output/iprg.progenesis.nest.RDS")
-# saveRDS(nested_prot, "output/iprg.skyline.nest.RDS")
+
+# Return features and peaks for removal -----------------------------------
+
+# Save .RDS files
+saveRDS(as.data.frame(df_rmftr), paste0("output/", dset_name, ".rmftr.RDS"))
+saveRDS(as.data.frame(df_rmpk), paste0("output/", dset_name, ".rmpk.RDS"))
 
 
 # Print profiles to file --------------------------------------------------
 # Features to be removed
 # pdf("output/iprg_mq_rm_01.pdf", width = 9, height = 6)
 # pdf("output/iprg_progenesis_rm.pdf", width = 9, height = 6)
-pdf("output/iprg_skyline_rm01.pdf", width = 9, height = 6)
+# pdf("output/iprg_skyline_rm01.pdf", width = 9, height = 6)
+pdf("output/bruderer_skyline_rm01.pdf", width = 9, height = 6)
+# pdf("output/bruderer_SN_rm01.pdf", width = 9, height = 6)
 for (i in which(nested_prot2$protein %in% df_rmftr$protein)[1:500]) {
-    if (!is.na(i)) {print(plot_profile_nest(nested_prot2, i))}
+    if (!is.na(i)) {print(plot_profile_nest(nested_prot2, i, yrange = c(5, 25)))}
 }
 dev.off()
 
@@ -168,7 +177,6 @@ for (i in which(str_detect(nested_prot2$protein, "P44015|P55752|P44374|P44983|P4
     print(plot_profile_nest(nested_prot2, i))
 }
 dev.off()
-
 
 
 # Median polish -----------------------------------------------------------
