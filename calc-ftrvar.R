@@ -8,13 +8,13 @@ library(broom)
 # Load functions and dataset ----------------------------------------------
 
 # DDA datasets 
-# load("data/DDA/iPRG_20170418/iprg.mq.RData")
+load("data/DDA/iPRG_20170418/iprg.mq.RData")
 # load("data/DDA/iPRG_20170418/iprg.progenesis.RData")
 # load("data/DDA/iPRG_20170418/iprg.skyline.RData")
 
 # DIA datasets
 # load("data/DIA/Bruderer_20170418/bruderer.skyline.RData")
-load("data/DIA/Bruderer_20170418/bruderer.SN.RData")
+# load("data/DIA/Bruderer_20170418/bruderer.SN.RData")
 
 dset_name <- ls()
 df_mss <- eval(parse(text = dset_name))
@@ -43,8 +43,8 @@ calc_mixprob <- function(x, mix_mu, mix_sigma, mix_lambda) {
 }
 
 plot_profile_ftr <- function(nested, idx, ftr, yrange = c(10, 35)) {
-    oneprot <- nested$subdata[[idx]] %>% 
-        mutate(hivar = if_else(feature %in% ftr, "high var", "low var"))
+    oneprot <- nested$data[[idx]] %>% 
+        mutate(hivar = if_else(feature %in% ftr, "high var / low coverage", "low var"))
     oneprot %>% 
         ggplot(aes(run, log2inty, color = peptide, group = feature)) + 
         geom_point(size = 3, alpha = 0.5) + geom_line() + 
@@ -122,33 +122,32 @@ mix <- normalmixEM(ftrvar$lv_eb, mu = c(-3, 0))
 
 ftrvar <- ftrvar %>% 
     mutate(mixprob = calc_mixprob(lv_eb, mix$mu, mix$sigma, mix$lambda))
+ftr_hivar <- ftrvar %>% filter(mixprob <= 0.01) %>% distinct(protein, feature)
+# ftr_hivar <- ftrvar %>% filter(mixprob <= 0.05)
 
-ftr_hivar <- ftrvar %>% filter(mixprob <= 0.05)
-nested_ftr <- ftr_hivar %>% nest(-protein)
+ftr_lowcvr <- nested_prot %>% unnest(data) %>% filter(is_lowcvr) %>% distinct(protein, feature)
+
+nested_ftr <- bind_rows(ftr_hivar, ftr_lowcvr) %>% nest(-protein)
 
 
-# Assuming most are from one single distribution
-# ftrvar_sum <- ftrvar %>% 
-#     filter(v != 0) %>% 
-#     mutate(lv = log(v)) %>% 
-#     summarise(lv_med = median(lv), lv_mad = mad(lv))
-# nested_ftr <- ftr_hivar %>% nest(-protein)
+# Return features for removal saved as .RDS files -------------------------
 
-# ftrvar %>% ggplot(aes(lv)) + 
-#     geom_histogram(aes(y = ..density..), binwidth = 0.025) + 
-#     stat_function(fun = dnorm, args = list(mean = ftrvar_sum$lv_med, sd = ftrvar_sum$lv_mad), col = 'red') + 
-#     geom_vline(xintercept = ftrvar_sum$lv_med + 2.5 * ftrvar_sum$lv_mad, col = "blue")
+df_rmftr <- nested_ftr %>% unnest(data) %>% rename(feature_rm = feature)
+saveRDS(as.data.frame(df_rmftr), paste0("output/", dset_name, ".hivar.RDS"))
 
 
 # Print profiles to file --------------------------------------------------
 
 # pdf("iprg_mq_hivar01.pdf", width = 9, height = 6)
-# pdf("iprg_progenesis_hivar.pdf", width = 9, height = 6)
-pdf("iprg_skyline_hivar01.pdf", width = 9, height = 6)
-# pdf("bruderer_SN_hivar.pdf", width = 9, height = 6)
+# pdf("iprg_progenesis_hivar01.pdf", width = 9, height = 6)
+# pdf("iprg_skyline_hivar01.pdf", width = 9, height = 6)
+# pdf("bruderer_SN_hivar01.pdf", width = 9, height = 6)
 for (i in 1:nrow(nested_ftr)) {
-    idx <- which(nested_prot2$protein == nested_ftr$protein[i])
-    print(plot_profile_ftr(nested_prot2, idx, nested_ftr$data[[i]]$feature, yrange = c(10, 35)))
+    idx <- which(nested_prot$protein == nested_ftr$protein[i])
+    print(plot_profile_ftr(nested_prot, idx, nested_ftr$data[[i]]$feature, yrange = c(10, 35)))
 }
 dev.off()
 
+
+# spike_iprg <- "P44015|P55752|P44374|P44983|P44683|P55249"
+# spike_bruderer <- "P00366|P00921|P02662|P02666|P02672|P02676|P02754|P02789|P12799|P61823|P68082|P80025"
