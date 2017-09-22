@@ -166,6 +166,34 @@ list_rmfeature <- function(df_prot, df_res) {
 }
 
 
+# Calculate feature variance with data from broom::augment
+calc_varfeature <- function(augmented_data, s_resid) {
+    varfeature <- augmented_data %>% 
+        mutate(y_samp = sample(log2inty)) %>% 
+        mutate(resid_samp = y_samp - .fitted) %>% 
+        group_by(feature) %>% 
+        summarise(
+            nb_run = n(), 
+            var_feature = sum(.resid ^ 2) / (nb_run - 1),
+            var_ref = sum(resid_samp ^ 2) / (nb_run - 1)
+        ) %>%
+        mutate(svar_feature = var_feature / s_resid, svar_ref = var_ref / s_resid) %>% 
+        select(feature, svar_feature, svar_ref)
+    
+    return(varfeature)
+}
+
+
+# Flag outlier with data from broom::augment
+flag_outlier <- function(augmented_data, s_resid, tol = 3) {
+    outlier <- augmented_data %>% 
+        mutate(is_olr = abs(.resid / s_resid) > tol) %>% 
+        select(run, feature, is_olr)
+    
+    return(outlier)
+}
+
+
 # Plot annotated profiles from nested data frame
 plot_profile_nest <- function(nested, idx, yrange = c(10, 35)) {
     oneprot <- nested$data[[idx]] %>% left_join(nested$subdata[[idx]]) %>% 
