@@ -7,40 +7,17 @@ pdata2ftr <- function(pdata) {
             feature = FEATURE, 
             run = originalRUN, 
             isolab = LABEL,
-            intensity = INTENSITY, 
+            log2inty = ABUNDANCE, 
             is_censored = censored
         ) %>% 
         mutate(
-            is_obs = !(is.na(intensity) | is_censored), 
-            log2inty = ifelse(is_obs, ifelse(intensity < 1, 0, log2(intensity)), NA), 
+            is_obs = !(is.na(log2inty) | is_censored), 
+            log2inty = ifelse(is_obs, log2inty, NA), 
             protein = as.character(protein), 
             peptide = as.character(peptide), 
             feature = as.character(feature), 
             run = as.character(run)
         )
-    
-    return(df_ftr)
-}
-
-
-# msstats input format to tbl to be used for feature selection
-mss2ftr <- function(df_msstats) {
-    df_ftr <- tbl_df(df_msstats) %>%
-        select(protein = ProteinName,
-               peptide = PeptideSequence,
-               z_ms1 = PrecursorCharge,
-               z_ms2 = ProductCharge,
-               fragment = FragmentIon,
-               isolab = IsotopeLabelType,
-               condition = Condition,
-               biorep = BioReplicate,
-               run = Run,
-               intensity = Intensity) %>% 
-        mutate(fragment = gsub(" ", "", as.character(fragment)), 
-               feature = paste(peptide, z_ms1, fragment, z_ms2, sep = "_"), 
-               is_obs = !is.na(intensity), 
-               log2inty = ifelse(is_obs, ifelse(intensity < 1, 0, log2(intensity)), NA)) %>% 
-        mutate(protein = as.character(protein), feature = as.character(feature), run = as.character(run))
     
     return(df_ftr)
 }
@@ -175,28 +152,7 @@ flag_hivar <- function(df_res) {
     # Test for high-coverage features (non-outlying observed measurements account for >50%)
     is_hicover <- (colSums(!mat_olrftr, na.rm = TRUE) / nrow(mat_olrftr)) > 0.5
     set_ftr <- colnames(mat_olrftr)[is_hicover]
-    # Further refinement (unflagging outliers)
-    # if (any(is_hicover)) {
-    #     mat_hicover <- mat_olrftr[, is_hicover, drop = FALSE]
-    #     # Test if all runs covered by >1 high-coverage features
-    #     run_cover <- rowSums(!is.na(mat_hicover)) > 0
-    #     run_incover <- rowSums(!mat_hicover, na.rm = TRUE) > 0
-    #     if (all(run_cover) && all(run_incover)) {
-    #         # All covered by high-coverage features
-    #         set_ftr <- colnames(mat_hicover)
-    #     } else if (all(run_cover) && any(run_incover)) {
-    #         # Some runs become uncovered when removing outliers -> swap good candidates
-    #         set_ftr <- colnames(mat_hicover)
-    #         run_per_ftr <- colSums(!mat_hicover, na.rm = TRUE)
-    #         for (i in which(!run_incover)) {
-    #             idx_cand <- which(!is.na(mat_hicover[i, ]))
-    #             run_per_cand <- run_per_ftr[idx_cand]
-    #             idx_maxcand <- which(run_per_cand == max(run_per_cand))
-    #             mat_hicover[i, idx_cand[idx_maxcand]] <- FALSE
-    #         }
-    #     }
-    # }
-    
+
     return(df_res %>% mutate(is_hivar = !(feature %in% set_ftr)))
 }
 
@@ -211,7 +167,7 @@ list_rmfeature <- function(df_prot, df_res) {
 
 
 # Plot annotated profiles from nested data frame
-plot_profile_nest <- function(nested, idx) {
+plot_profile_nest <- function(nested, idx, yrange = c(10, 35)) {
     oneprot <- nested$data[[idx]] %>% left_join(nested$subdata[[idx]]) %>% 
         mutate(olr = if_else(is_olr, "Yes", "No/Unsure", "No/Unsure")) %>% 
         mutate(ftr_olr = if_else(is_lowcvr | is_hivar, "Remove", "Select"), 
@@ -222,6 +178,114 @@ plot_profile_nest <- function(nested, idx) {
         scale_alpha_discrete(range = c(0.5, 1)) + 
         ggtitle(nested$protein[idx]) + 
         facet_wrap(~ ftr_olr, drop = F) + 
-        coord_cartesian(ylim = c(10, 35)) + 
+        coord_cartesian(ylim = yrange) + 
         theme(legend.position = "none", axis.text.x = element_blank())
 }
+
+
+# Plot annotated profiles from nested data frame
+plot_profile_nest2 <- function(nested, idx, yrange = c(10, 35)) {
+    oneprot <- nested$data[[idx]] %>% left_join(nested$subdata[[idx]]) %>% 
+        mutate(olr = if_else(is_olr, "Yes", "No/Unsure", "No/Unsure")) %>% 
+        group_by(feature) %>% 
+        mutate(ftr_olr = if_else(all(is_lowcvr) | all(is_hivar), "Remove", 
+                                 if_else(any(olr == "Yes"), "w/ outliers", "w/o outliers"))) %>% 
+        ungroup() %>% 
+        mutate(ftr_olr = factor(ftr_olr, levels = c("Remove", "w/ outliers", "w/o outliers")))
+    oneprot %>% 
+        ggplot(aes(run, log2inty, color = peptide, group = feature, shape = olr, alpha = olr)) + 
+        geom_point(size = 3) + geom_line() + 
+        scale_alpha_discrete(range = c(0.5, 1)) + 
+        ggtitle(nested$protein[idx]) + 
+        facet_wrap(~ ftr_olr, drop = F) + 
+        coord_cartesian(ylim = yrange) + 
+        theme(legend.position = "none", axis.text.x = element_blank())
+}
+
+
+# Experimental ------------------------------------------------------------
+
+# Extract scaled residuals
+extract_sres <- function(fit) {
+    shat <- summary(fit)$sigma
+    fit %>% 
+        augment() %>% 
+        mutate(scl_r = .resid / shat, std_r = scl_r / sqrt(1 - .hat)) %>% 
+        select(run, feature, scl_r, std_r)
+}
+
+# Posterior probability of two-component mixture model
+calc_mixprob <- function(x, mix_mu, mix_sigma, mix_lambda) {
+    logodd <- dnorm(x, mix_mu[2], mix_sigma[2], log = TRUE) - 
+        dnorm(x, mix_mu[1], mix_sigma[1], log = TRUE) + 
+        log(mix_lambda[2]) - log(mix_lambda[1])
+    
+    return(1 / (1 + exp(logodd)))
+}
+
+# Scaled normal density
+snorm <- function(x, mu, sigma, lambda) {
+    dnorm(x, mu, sigma) * lambda
+}
+
+
+# Extract residuals & scaled residuals
+extract_res <- function(fit) {
+    shat <- summary(fit)$sigma
+    fit %>% 
+        augment() %>% 
+        mutate(r = .resid, scl_r = .resid / shat) %>% 
+        select(run, feature, r, scl_r)
+}
+
+
+# Being deprecated --------------------------------------------------------
+
+# Intensity column is not normalized across runs
+pdata2ftr_old <- function(pdata) {
+    df_ftr <- tbl_df(pdata) %>%
+        select(
+            protein = PROTEIN,
+            peptide = PEPTIDE,
+            feature = FEATURE, 
+            run = originalRUN, 
+            isolab = LABEL,
+            intensity = INTENSITY, 
+            is_censored = censored
+        ) %>% 
+        mutate(
+            is_obs = !(is.na(intensity) | is_censored), 
+            log2inty = ifelse(is_obs, ifelse(intensity < 1, 0, log2(intensity)), NA), 
+            protein = as.character(protein), 
+            peptide = as.character(peptide), 
+            feature = as.character(feature), 
+            run = as.character(run)
+        )
+    
+    return(df_ftr)
+}
+
+
+# msstats input format to tbl to be used for feature selection
+mss2ftr <- function(df_msstats) {
+    df_ftr <- tbl_df(df_msstats) %>%
+        select(protein = ProteinName,
+               peptide = PeptideSequence,
+               z_ms1 = PrecursorCharge,
+               z_ms2 = ProductCharge,
+               fragment = FragmentIon,
+               isolab = IsotopeLabelType,
+               condition = Condition,
+               biorep = BioReplicate,
+               run = Run,
+               intensity = Intensity) %>% 
+        mutate(fragment = gsub(" ", "", as.character(fragment)), 
+               feature = paste(peptide, z_ms1, fragment, z_ms2, sep = "_"), 
+               is_obs = !is.na(intensity), 
+               log2inty = ifelse(is_obs, ifelse(intensity < 1, 0, log2(intensity)), NA)) %>% 
+        mutate(protein = as.character(protein), feature = as.character(feature), run = as.character(run))
+    
+    return(df_ftr)
+}
+
+
