@@ -167,17 +167,17 @@ list_rmfeature <- function(df_prot, df_res) {
 
 
 # Calculate feature variance with data from broom::augment
-calc_varfeature <- function(augmented_data, s_resid) {
+calc_fvar <- function(augmented_data, s_resid, rm_olr = FALSE) {
+    if (rm_olr) {
+        augmented_data <- augmented_data %>% 
+            mutate(is_olr = abs(.resid / s_resid) > 3) %>% 
+            filter(!is_olr)
+    }
     varfeature <- augmented_data %>% 
         mutate(y_samp = sample(log2inty)) %>% 
-        mutate(resid_samp = y_samp - .fitted) %>% 
-        group_by(feature) %>% 
-        summarise(
-            nb_run = n(), 
-            var_feature = sum(.resid ^ 2) / (nb_run - 1),
-            var_ref = sum(resid_samp ^ 2) / (nb_run - 1)
-        ) %>%
-        mutate(svar_feature = var_feature / s_resid, svar_ref = var_ref / s_resid) %>% 
+        group_by(feature) %>%
+        summarise(var_feature = sum(.resid ^ 2) / (n() - 1), var_ref = var(y_samp)) %>% 
+        mutate(svar_feature = var_feature / s_resid ^ 2, svar_ref = var_ref / s_resid ^ 2) %>% 
         select(feature, svar_feature, svar_ref)
     
     return(varfeature)
@@ -185,10 +185,25 @@ calc_varfeature <- function(augmented_data, s_resid) {
 
 
 # Flag outlier with data from broom::augment
-flag_outlier <- function(augmented_data, s_resid, tol = 3) {
+flag_outlier <- function(augmented_data, s_resid, tol = 3, keep_run = FALSE) {
     outlier <- augmented_data %>% 
         mutate(is_olr = abs(.resid / s_resid) > tol) %>% 
         select(run, feature, is_olr)
+    # To keep runs from being completely removed
+    if (keep_run) {
+        uncovered_run <- outlier %>% 
+            group_by(run) %>% 
+            filter(all(is_olr)) %>% 
+            ungroup() %>% 
+            distinct(run)
+        # Handle uncovered runs below
+        if (nrow(uncovered_run) > 0) {
+            outlier <- bind_rows(
+                outlier %>% anti_join(uncovered_run), 
+                outlier %>% semi_join(uncovered_run) %>% mutate(is_olr = FALSE)
+            )
+        }
+    }
     
     return(outlier)
 }
@@ -227,6 +242,29 @@ plot_profile_nest2 <- function(nested, idx, yrange = c(10, 35)) {
         ggtitle(nested$protein[idx]) + 
         facet_wrap(~ ftr_olr, drop = F) + 
         coord_cartesian(ylim = yrange) + 
+        theme(legend.position = "none", axis.text.x = element_blank())
+}
+
+# Plot annotated profiles from data frame per protein
+plot_profile_fltr <- function(oneprot, protein_name, show_olr = FALSE, yrange = c(10, 35), labeled = FALSE) {
+    if (show_olr) {
+        gprofile <- oneprot %>%
+            ggplot(aes(run, log2inty, color = peptide, group = feature, shape = olr))
+    } else {
+        gprofile <- oneprot %>%
+            ggplot(aes(run, log2inty, color = peptide, group = feature))
+    }
+    if (labeled) {
+        gprofile <- gprofile + facet_grid(isolab ~ noise, drop = F)
+    } else {
+        gprofile <- gprofile + facet_grid(. ~ noise, drop = F)
+    }
+    
+    gprofile + 
+        geom_point(size = 3, alpha = 0.5) + 
+        geom_line() +
+        ggtitle(protein_name) +
+        coord_cartesian(ylim = yrange) +
         theme(legend.position = "none", axis.text.x = element_blank())
 }
 
@@ -317,3 +355,19 @@ mss2ftr <- function(df_msstats) {
 }
 
 
+# Calculate feature variance with data from broom::augment
+calc_varfeature <- function(augmented_data, s_resid) {
+    varfeature <- augmented_data %>%
+        mutate(y_samp = sample(log2inty)) %>%
+        mutate(resid_samp = y_samp - .fitted) %>%
+        group_by(feature) %>%
+        summarise(
+            nb_run = n(),
+            var_feature = sum(.resid ^ 2) / (nb_run - 1),
+            var_ref = sum(resid_samp ^ 2) / (nb_run - 1)
+        ) %>%
+        mutate(svar_feature = var_feature / s_resid ^ 2, svar_ref = var_ref / s_resid ^ 2) %>%
+        select(feature, svar_feature, svar_ref)
+    
+    return(varfeature)
+}
