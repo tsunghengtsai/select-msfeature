@@ -166,8 +166,40 @@ list_rmfeature <- function(df_prot, df_res) {
 }
 
 
+# Wrapper to fit robust linear model for one protein
+fit_prot_huber <- function(df_prot) {
+    fit <- rlm(log2inty ~ run + feature, data = df_prot, scale.est = "Huber")
+    
+    return(fit)
+}
+
+
 # Calculate feature variance with data from broom::augment
 calc_fvar <- function(augmented_data, s_resid, rm_olr = FALSE) {
+    v_resid <- s_resid ^ 2
+    if (rm_olr) {
+        augmented_data <- augmented_data %>% 
+            mutate(is_olr = abs(.resid / s_resid) > 3) %>% 
+            filter(!is_olr)
+    }
+    varfeature <- augmented_data %>% 
+        # mutate(y_samp = sample(log2inty)) %>% 
+        mutate(resid_null = log2inty - mean(log2inty)) %>% 
+        group_by(feature) %>%
+        summarise(
+            nb_run = n(), 
+            svar_feature = sum(.resid ^ 2) / (nb_run - 1) / v_resid, 
+            svar_ref = sum(resid_null ^ 2) / (nb_run - 1) / v_resid
+            # svar_ref = var(y_samp) / v_resid
+        ) %>% 
+        select(feature, svar_feature, svar_ref)
+    
+    return(varfeature)
+}
+
+
+# Calculate feature variance with different ways generating ref distributions
+calc_fvars <- function(augmented_data, s_resid, rm_olr = FALSE) {
     if (rm_olr) {
         augmented_data <- augmented_data %>% 
             mutate(is_olr = abs(.resid / s_resid) > 3) %>% 
@@ -175,13 +207,35 @@ calc_fvar <- function(augmented_data, s_resid, rm_olr = FALSE) {
     }
     varfeature <- augmented_data %>% 
         mutate(y_samp = sample(log2inty)) %>% 
+        mutate(resid_samp = y_samp - .fitted) %>% 
+        mutate(resid_samp2 = log2inty - mean(log2inty)) %>% 
         group_by(feature) %>%
-        summarise(var_feature = sum(.resid ^ 2) / (n() - 1), var_ref = var(y_samp)) %>% 
-        mutate(svar_feature = var_feature / s_resid ^ 2, svar_ref = var_ref / s_resid ^ 2) %>% 
-        select(feature, svar_feature, svar_ref)
+        summarise(
+            nb_run = n(), 
+            var_feature = sum(.resid ^ 2) / (nb_run - 1),
+            var_ref = var(y_samp), 
+            var_ref2 = sum(resid_samp2 ^ 2) / (nb_run - 1)
+        ) %>%
+        mutate(svar_feature = var_feature / s_resid ^ 2, svar_ref = var_ref / s_resid ^ 2, 
+               svar_ref2 = var_ref2 / s_resid ^ 2) %>% 
+        select(feature, svar_feature, svar_ref, svar_ref2)
+    
+    # summarise(
+    #     nb_run = n(), 
+    #     var_feature = sum(.resid ^ 2) / (nb_run - 1),
+    #     var_ref = var(y_samp), 
+    #     var_ref2 = sum(resid_samp2 ^ 2) / (nb_run - 1), 
+    #     var_ref3 = var(log2inty), 
+    #     var_ref4 = sum(resid_samp ^ 2) / (nb_run - 1)
+    # ) %>%
+    # mutate(svar_feature = var_feature / s_resid ^ 2, svar_ref = var_ref / s_resid ^ 2,
+    #        svar_ref2 = var_ref2 / s_resid ^ 2, svar_ref3 = var_ref3 / s_resid ^ 2,
+    #        svar_ref4 = var_ref4 / s_resid ^ 2) %>%
+    # select(feature, svar_feature, svar_ref, svar_ref2, svar_ref3, svar_ref4)
     
     return(varfeature)
 }
+
 
 
 # Flag outlier with data from broom::augment
