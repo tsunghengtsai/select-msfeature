@@ -359,6 +359,242 @@ extract_res <- function(fit) {
 }
 
 
+# Intermediate results during summarization
+gen_subplot <- function(df_mss, censoredInt, MBimpute = TRUE, message = TRUE) {
+    
+    if (is.null(censoredInt)) {
+        message("censoredInt is not provided - set as 'NA'")
+        censoredInt <- "NA"
+    } else if (length(censoredInt) > 1) {
+        error("censoredInt should be either '0' or 'NA'")
+    } else if (!(censoredInt %in% c("NA", "0"))) {
+        error("Set censoredInt as '0' or 'NA'")
+    }
+    
+    # Clean up
+    df_mss <- as_tibble(df_mss) %>% 
+        modify_if(is.factor, as.character) %>% 
+        mutate(
+            labfeature = paste(FEATURE, LABEL, sep = "_"), 
+            labrun = paste(RUN, LABEL, sep = "_")
+        )
+    
+    # Is the dataset label-based (or label-free)?
+    is_labeled <- n_distinct(df_mss$LABEL) == 2
+    
+    # Replace censored values with censoredInt
+    if (MBimpute) {
+        if (censoredInt == "0") {
+            df_mss$ABUNDANCE[df_mss$censored] <- 0
+        } else if (censoredInt == "NA") {
+            df_mss$ABUNDANCE[df_mss$censored] <- NA
+        }
+        df_mss <- df_mss %>% 
+            mutate(is_obs = ifelse(censored, 0, 1))
+    }
+    df_mss <- df_mss %>% 
+        mutate(is_missed = is.na(ABUNDANCE))
+    
+    # Create a nested data frame wrt protein
+    nested <- df_mss %>% 
+        nest(-PROTEIN)
+    nb_prot <- nrow(nested)
+    
+    # Empty lists to save intermediate results
+    predAbundance <- vector("list", nb_prot)
+    result <- vector("list", nb_prot)
+    runquant.intermediate <- vector("list", nb_prot)
+    runquant.intermediate.adjust <- vector("list", nb_prot)
+    
+    for (i in 1:nb_prot) {
+        
+        if (message) {
+            message(paste("Getting the summarization by Tukey's median polish for protein", 
+                          nested$PROTEIN[i], "(", i, "of", nb_prot, ")"))
+        }
+        
+        oneprot <- nested$data[[i]]
+        # Check if the protein is good for summarization with valid peaks
+        valid_pks <- oneprot %>% 
+            filter(LABEL == "L", !is_missed, !censored)
+        if (nrow(valid_pks) == 0) {
+            message(paste("Can't summarize for", nested$PROTEIN[i], "(", i, "of", nrow(nested), ")", 
+                          "because all measurements are NAs."))
+            next()
+        }
+        
+        # Remove features with only one measurement
+        cnt_feature <- valid_pks %>% 
+            count(FEATURE)
+        if (all(cnt_feature$n == 1)) {
+            message(paste("Can't summarize for", nested$PROTEIN[i], "(", i, "of", nrow(nested), ")", 
+                          "because features have only one measurement across MS runs."))
+            next()
+        }
+        # [TODO]: this would also remove labeled peptides - to be confirmed 
+        oneprot <- oneprot %>% 
+            semi_join(cnt_feature %>% filter(n > 1))
+        
+        # Remove uncovered runs (all endogenous are either missing or censored)
+        covered <- valid_pks %>% 
+            semi_join(cnt_feature %>% filter(n > 1)) %>% 
+            distinct(RUN) %>% 
+            .$RUN
+        oneprot <- oneprot %>% filter(RUN %in% covered)
+        
+        # Impute censored values
+        if (MBimpute) {
+            if (is_labeled) {
+                oneprot_h <- oneprot %>% filter(LABEL == "H")
+                oneprot_l <- oneprot %>% filter(LABEL == "L")
+            } else {
+                oneprot_l <- oneprot
+            }
+            if (any(oneprot_l$censored)) {
+                # Replace censored values by feature-specific thresholds
+                oneprot_l <- oneprot_l %>% 
+                    group_by(labfeature) %>% 
+                    mutate(cen_thresh = 0.99 * min(ABUNDANCE[!(censored | is_missed)])) %>% 
+                    ungroup() %>% 
+                    mutate(ABUNDANCE = ifelse(censored, cen_thresh, ABUNDANCE)) %>% 
+                    select(-cen_thresh)
+                # AFT model
+                subtmp <- oneprot_l %>% filter(!is_missed)
+                insufDF <- nrow(subtmp) < (n_distinct(subtmp$FEATURE) + n_distinct(subtmp$RUN) - 1)
+                
+                set.seed(100)
+                if (n_distinct(subtmp$FEATURE) == 1) {
+                    fittest <- survreg(Surv(ABUNDANCE, is_obs, type = 'left') ~ RUN, data = oneprot_l, dist = 'gaussian')
+                } else {
+                    if (insufDF) {
+                        fittest <- survreg(Surv(ABUNDANCE, is_obs, type = 'left') ~ RUN, data = oneprot_l, dist = 'gaussian')
+                    } else {
+                        fittest <- survreg(Surv(ABUNDANCE, is_obs, type = 'left') ~ FEATURE + RUN, data = oneprot_l, dist = 'gaussian')
+                    }
+                }
+                # Replace censored values with predicted values by AFT
+                oneprot_l <- oneprot_l %>% 
+                    mutate(pred = predict(fittest, newdata = oneprot_l, type = "response")) %>% 
+                    mutate(ABUNDANCE = ifelse(censored, pred, ABUNDANCE))
+                
+                predAbundance[[i]] <- oneprot_l %>%
+                    mutate(PROTEIN = nested$PROTEIN[i])
+                
+                if (is_labeled) {
+                    # Merge with labeled peptide
+                    oneprot_h$pred <- NA
+                    oneprot <- rbind(oneprot_h, oneprot_l)
+                } else {
+                    oneprot <- oneprot_l
+                }
+                
+            } else {
+                # No censored values
+                predAbundance[[i]] <- oneprot_l %>%
+                    mutate(pred = NA, PROTEIN = nested$PROTEIN[i])
+                oneprot$pred <- NA
+            }
+        }
+        
+        # Remove NA in abundance prior to TMP (likely introduced by AFT?)
+        oneprot <- oneprot %>% filter(!is.na(ABUNDANCE))
+        
+        # Tukey's median polish
+        if (n_distinct(oneprot$FEATURE) > 1) { 
+            # for more than 1 features
+            if (!is_labeled) {
+                inty_wide <- oneprot %>% 
+                    select(FEATURE, RUN, ABUNDANCE) %>% 
+                    spread(FEATURE, ABUNDANCE)
+                inty_mat <- data.matrix(inty_wide[, -1])
+                mp_out <- medpolish(inty_mat, na.rm = TRUE, trace.iter = FALSE)
+                
+                sub_result <- data.frame(
+                    Protein = nested$PROTEIN[i], 
+                    LogIntensities = mp_out$overall + mp_out$row, 
+                    RUN = inty_wide$RUN
+                )
+                
+                result[[i]] <- sub_result
+                
+            } else { 
+                # Labeled - additional adjustment based on the reference
+                inty_wide <- oneprot %>% 
+                    select(FEATURE, labrun, ABUNDANCE) %>% 
+                    spread(FEATURE, ABUNDANCE)
+                inty_mat <- data.matrix(inty_wide[, -1])
+                mp_out <- medpolish(inty_mat, na.rm = TRUE, trace.iter = FALSE)
+                
+                reformresult.intermediate <- data.frame(
+                    Protein = nested$PROTEIN[i], 
+                    LogIntensities = mp_out$overall + mp_out$row, 
+                    labrun = inty_wide$labrun
+                ) %>% 
+                    mutate(
+                        RUN = str_sub(labrun, 1, -3), 
+                        LABEL = str_sub(labrun, -1, -1)
+                    ) %>% 
+                    select(-labrun)
+                
+                runquant.intermediate[[i]] <- reformresult.intermediate
+                
+                adj_h <- reformresult.intermediate %>% 
+                    filter(LABEL == "H") %>% 
+                    mutate(log2inty_adj = median(LogIntensities, na.rm = TRUE) - LogIntensities) %>% 
+                    select(RUN, log2inty_adj)
+                reformresult.intermediate.adjust <- reformresult.intermediate %>% 
+                    left_join(adj_h) %>% 
+                    mutate(LogIntensities = LogIntensities + log2inty_adj) %>% 
+                    select(-log2inty_adj)
+                
+                runquant.intermediate.adjust[[i]] <- reformresult.intermediate.adjust
+                
+                # Adjusted results for the endogenous
+                sub_result <- reformresult.intermediate.adjust %>% 
+                    filter(LABEL == "L") %>% 
+                    select(-LABEL)
+                
+                result[[i]] <- sub_result
+            }
+        } else { 
+            # single feature 
+            # [TODO]: mistakes to be fixed
+            if (is_labeled) { 
+                # Label-based 
+                ## single feature, adjust reference feature difference
+                allmed <- median(oneprot$ABUNDANCE[oneprot$LABEL == "H"], na.rm = TRUE)
+                
+                for (k in 1:length(unique(h$RUN))) {
+                    ## ABUNDANCE is normalized
+                    subrun.logical <- oneprot$RUN == unique(h$RUN)[k]
+                    subrun.idx <- which(subrun.logical)
+                    oneprot[subrun.idx, "ABUNDANCE"] <- oneprot[subrun.idx, "ABUNDANCE"] - oneprot[subrun.logical & oneprot$LABEL=="H","ABUNDANCE"]+allmed
+                }
+                
+                subtmp <- sun %>% 
+                    filter(LABEL == "L", !is_missed)
+                sub_result <- data.frame(
+                    Protein = subtmp$PROTEIN,
+                    LogIntensities = subtmp$ABUNDANCE, 
+                    RUN = subtmp$RUN
+                )
+                result[[i]] <- sub_result
+            }
+        }
+    }  ## loop for proteins
+    
+    # Final result
+    finalout <- list(
+        rqdata = bind_rows(result), 
+        PredictedBySurvival = bind_rows(predAbundance),
+        runquant.intermediate = bind_rows(runquant.intermediate),
+        runquant.intermediate.adjust = bind_rows(runquant.intermediate.adjust)
+    )
+    
+    return(finalout)
+}
+
+
 # Being deprecated --------------------------------------------------------
 
 # Intensity column is not normalized across runs
