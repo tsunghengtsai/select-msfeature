@@ -360,7 +360,7 @@ extract_res <- function(fit) {
 
 
 # Modify bad-quality features & peaks
-modify_badftrpk <- function(df_all, df_rmftr = NULL, df_rmpk = NULL, cen_val = NA) {
+modify_badftrpk <- function(df_all, df_rmftr = NULL, df_rmpk = NULL, cen_val = NA, rm_olr = FALSE) {
     
     if (is.null(df_rmftr)) {
         message("df_rmftr is missing - no information about features for removal")
@@ -400,13 +400,18 @@ modify_badftrpk <- function(df_all, df_rmftr = NULL, df_rmpk = NULL, cen_val = N
         df_sub <- df_sub %>% 
             mutate(peak_lab = str_c(orig_run, feature, label, sep = "_"))
         
-        # Censored the outliers of the endogenous (may need revisions...)
-        df_sub$is_censored[df_sub$label == "L" & df_sub$peak_lab %in% df_rmpk$peak_lab] <- TRUE
-        
-        # Replace outliers of the labeled with NA
-        df_sub$log2inty[df_sub$label == "H" & df_sub$peak_lab %in% df_rmpk$peak_lab] <- NA
-        
-        df_sub <- df_sub %>% select(-peak_lab)
+        if (rm_olr) {
+            df_sub <- df_sub %>% 
+                filter(!(peak_lab %in% df_rmpk$peak_lab)) %>% 
+                select(-peak_lab)
+        } else {
+            # Censored the outliers of the endogenous (may need revisions...)
+            df_sub$is_censored[df_sub$label == "L" & df_sub$peak_lab %in% df_rmpk$peak_lab] <- TRUE
+            # Replace outliers of the labeled with NA
+            df_sub$log2inty[df_sub$label == "H" & df_sub$peak_lab %in% df_rmpk$peak_lab] <- NA
+            
+            df_sub <- df_sub %>% select(-peak_lab)
+        }
     }
     df_sub$log2inty[df_sub$is_censored] <- cen_val
     
